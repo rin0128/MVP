@@ -30,7 +30,7 @@ cypher_prompt = ChatPromptTemplate.from_messages(
 )
 
 # OpenAI LLM のセットアップ
-llm = ChatOpenAI(model="gpt-4o", temperature=0, openai_api_key=OPENAI_API_KEY)
+llm = ChatOpenAI(model="gpt-4o", temperature=1, openai_api_key=OPENAI_API_KEY)
 
 # クエリ生成チェイン
 queryGenChain = (
@@ -66,5 +66,5 @@ chain = (
 
 # ✅ 質問を入力
 if __name__ == "__main__":
-    result = chain.invoke({"question": "中尾の好きなものは？"})
+    result = chain.invoke({"question": "私は中尾です。私の存在する価値ってなんだと思いますか？"})
     print("🟢 AI の回答:", result)
