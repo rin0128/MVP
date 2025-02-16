@@ -57,7 +57,7 @@ llm = ChatOpenAI(
 logger.debug("OpenAI LLMを初期化しました。")
 
 # ======================
-# 3. クエリ生成チェイン
+# 3. クエリ生成チェイン（既存のRAGチェイン）
 # ======================
 queryGenChain = (
     RunnablePassthrough.assign(schema=lambda _: graph.get_schema)  # graph.get_schema を schema にセット
@@ -84,7 +84,7 @@ response_prompt = ChatPromptTemplate.from_messages(
 logger.debug("自然言語変換用プロンプトを設定しました。")
 
 # ======================
-# 5. 全体チェイン
+# 5. 全体チェイン（既存のRAG処理）
 # ======================
 def execute_cypher_or_none(query: str, graph: Neo4jGraph):
     """
@@ -130,6 +130,45 @@ chain = (
 )
 logger.debug("全体チェインを構築しました。")
 
+# ======================
+# 6. ゲーティングモジュール（外部情報が必要かどうかの判定）
+# ======================
+def requires_external_info(query: str) -> bool:
+    # 簡易的なキーワードチェックおよび文字数で判定
+    keywords = ["部署", "業績", "投資家", "市場", "数値", "最新"]
+    if any(word in query for word in keywords):
+        logger.debug("requires_external_info: キーワードにより外部情報が必要と判定")
+        return True
+    if len(query) > 100:
+        logger.debug("requires_external_info: 長文により外部情報が必要と判定")
+        return True
+    return False
+
+# ======================
+# 7. 単体GPT生成（外部情報が不要な場合のシンプルな回答）
+# ======================
+def generate_plain_answer(query: str) -> str:
+    prompt = f"ユーザーの質問: {query}\n流暢で詳細な回答を生成してください。"
+    logger.debug(f"generate_plain_answer: prompt: {prompt}")
+    try:
+        result = llm.invoke({"prompt": prompt})
+        logger.debug(f"generate_plain_answer: result: {result}")
+        return result
+    except Exception as e:
+        logger.exception("generate_plain_answer: エラー発生")
+        return "回答生成中にエラーが発生しました。"
+
+# ======================
+# 8. 最終回答生成関数（ゲーティングによる分岐）
+# ======================
+def generate_final_answer(query: str) -> str:
+    if requires_external_info(query):
+        logger.info("外部情報が必要な質問と判定。RAGパイプラインを使用します。")
+        return chain.invoke({"question": query})
+    else:
+        logger.info("外部情報が不要な質問と判定。シンプルなGPT生成を使用します。")
+        return generate_plain_answer(query)
+
 # ----------------------
 # FastAPI アプリの設定
 # ----------------------
@@ -163,11 +202,10 @@ async def root():
 async def ask_question(request: QueryRequest):
     user_question = request.question
     logger.info(f"受信した質問: {user_question}")
-
     try:
-        result = chain.invoke({"question": user_question})
-        logger.info(f"生成された回答: {result}")
-        return {"answer": result}
+        answer = generate_final_answer(user_question)
+        logger.info(f"生成された回答: {answer}")
+        return {"answer": answer}
     except Exception as e:
         logger.exception(f"エラー発生: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
@@ -181,10 +219,10 @@ if __name__ == "__main__":
     logger.info(f"[DEBUG MODE] テスト用の質問: {test_question}")
     
     try:
-        result = chain.invoke({"question": test_question})
-        logger.info(f"[DEBUG MODE] 生成された回答: {result}")
+        final_answer = generate_final_answer(test_question)
+        logger.info(f"[DEBUG MODE] 生成された回答: {final_answer}")
         print("===== デバッグ結果 =====")
         print(f"質問: {test_question}")
-        print(f"回答: {result}")
+        print(f"回答: {final_answer}")
     except Exception as e:
         logger.exception("[DEBUG MODE] エラー発生")
