@@ -13,6 +13,9 @@ from langchain_core.runnables import RunnablePassthrough
 from langchain_community.graphs import Neo4jGraph
 from config import NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, OPENAI_API_KEY
 
+# Conversation memory を利用するためのインポート
+from langchain.memory import ConversationBufferMemory
+
 # ログ設定
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -24,6 +27,11 @@ graph = Neo4jGraph(
     password=NEO4J_PASSWORD
 )
 logger.info("Neo4jに接続しました。")
+
+# ----------------------
+# 会話履歴を保持するメモリ（MVP用：インメモリ）
+# ----------------------
+conversation_memory = ConversationBufferMemory(memory_key="chat_history", return_messages=False)
 
 # ======================
 # 1. Cypherクエリ生成プロンプト
@@ -135,7 +143,7 @@ logger.debug("全体チェインを構築しました。")
 # ======================
 def requires_external_info(query: str) -> bool:
     # 簡易的なキーワードチェックおよび文字数で判定
-    keywords = ["部署", "業績", "投資家", "市場", "数値", "最新"]
+    keywords = ["中尾", "私", "投資家", "市場", "数値", "最新"]
     if any(word in query for word in keywords):
         logger.debug("requires_external_info: キーワードにより外部情報が必要と判定")
         return True
@@ -159,15 +167,28 @@ def generate_plain_answer(query: str) -> str:
         return "回答生成中にエラーが発生しました。"
 
 # ======================
-# 8. 最終回答生成関数（ゲーティングによる分岐）
+# 8. 最終回答生成関数（ゲーティングによる分岐＋会話履歴の統合）
 # ======================
 def generate_final_answer(query: str) -> str:
-    if requires_external_info(query):
+    # 会話履歴を取得
+    history = conversation_memory.load_memory_variables({}).get("chat_history", "")
+    if history:
+        modified_query = f"【会話履歴】\n{history}\n【新しい質問】\n{query}"
+    else:
+        modified_query = query
+
+    logger.debug(f"generate_final_answer: modified_query: {modified_query}")
+
+    if requires_external_info(modified_query):
         logger.info("外部情報が必要な質問と判定。RAGパイプラインを使用します。")
-        return chain.invoke({"question": query})
+        final_answer = chain.invoke({"question": modified_query})
     else:
         logger.info("外部情報が不要な質問と判定。シンプルなGPT生成を使用します。")
-        return generate_plain_answer(query)
+        final_answer = generate_plain_answer(modified_query)
+    
+    # 会話履歴に保存（入力と出力のペア）
+    conversation_memory.save_context({"input": modified_query}, {"output": final_answer})
+    return final_answer
 
 # ----------------------
 # FastAPI アプリの設定
@@ -215,7 +236,7 @@ async def ask_question(request: QueryRequest):
 # ----------------------
 if __name__ == "__main__":
     logger.info("[DEBUG MODE] ローカルデバッグ開始")
-    test_question = "私は中尾です。私について投資家に魅力的に見えるように説明してください"
+    test_question = "私は中尾です。私の本質的な強みはなんだと思いますか？クエリの情報から推論してください"
     logger.info(f"[DEBUG MODE] テスト用の質問: {test_question}")
     
     try:
