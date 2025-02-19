@@ -16,6 +16,44 @@ from config import NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, OPENAI_API_KEY
 # Conversation memory を利用するためのインポート
 from langchain.memory import ConversationBufferMemory
 
+# ファイルの先頭あたりで定義する
+global_system_message = """\
+あなたは優秀なAIアシスタントです。
+ユーザーに対して、できるだけ丁寧でわかりやすく、少しフレンドリーに回答をしてください。
+不明な点や曖昧な情報がある場合は、その旨を伝えた上で推測や追加の情報を求めてください。
+"""
+
+
+def generate_final_answer(query: str) -> str:
+    # 会話履歴を取得
+    history = conversation_memory.load_memory_variables({}).get("chat_history", "")
+    if history:
+        modified_query = f"【会話履歴】\n{history}\n【新しい質問】\n{query}"
+    else:
+        modified_query = query
+    logger.debug(f"generate_final_answer: modified_query (before system message): {modified_query}")
+
+    # ここでグローバルシステムメッセージを追加する
+    modified_query = f"{global_system_message}\n{modified_query}"
+    logger.debug(f"generate_final_answer: modified_query (after system message): {modified_query}")
+
+    additional_instructions = "論理的根拠を示してください。また、複数の視点から答えてください。"
+
+    if requires_external_info(modified_query):
+        logger.info("外部情報が必要な質問と判定。RAGパイプラインを使用します。")
+        # RAGパスの場合、追加指示も付け加える
+        modified_query = f"{modified_query}\n{additional_instructions}"
+        final_answer = chain.invoke({"question": modified_query})
+    else:
+        logger.info("外部情報が不要な質問と判定。シンプルなGPT生成を使用します。")
+        # 単体GPT生成の場合は generate_plain_answer 内で追加指示を使っています
+        final_answer = generate_plain_answer(modified_query)
+    
+    conversation_memory.save_context({"input": modified_query}, {"output": final_answer})
+    return final_answer
+
+
+
 # ログ設定
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -60,6 +98,7 @@ logger.debug("Cypherクエリ生成プロンプトを設定しました。")
 llm = ChatOpenAI(
     model="gpt-4o",
     temperature=1,
+    top_p=0.9,
     openai_api_key=OPENAI_API_KEY
 )
 logger.debug("OpenAI LLMを初期化しました。")
@@ -78,10 +117,20 @@ logger.debug("クエリ生成チェインを構築しました。")
 # ======================
 # 4. クエリ実行 & 自然言語変換のチェイン
 # ======================
-response_template = """質問、Cypherクエリ、およびクエリ実行結果に基づいて、自然言語で回答を書いてください:
-質問: {question}
-Cypherクエリ: {query}
-クエリ実行結果: {response}"""
+response_template = """以下の情報を踏まえて回答してください。
+
+【入力情報】
+- 質問: {question}
+- Cypherクエリ: {query}
+- クエリ実行結果: {response}
+
+【回答の指示】
+1. まず、上記の入力情報を簡潔に要約してください。
+2. 次に、要約を基に複数の視点から論理的根拠を示しながら詳細な説明を行ってください。
+3. 最後に、明確な結論として回答をまとめてください。
+
+以上の手順に従って、自然で流暢な回答を生成してください。"""
+
 
 response_prompt = ChatPromptTemplate.from_messages(
     [
@@ -156,7 +205,12 @@ def requires_external_info(query: str) -> bool:
 # 7. 単体GPT生成（外部情報が不要な場合のシンプルな回答）
 # ======================
 def generate_plain_answer(query: str) -> str:
-    prompt = f"ユーザーの質問: {query}\n流暢で詳細な回答を生成してください。"
+    additional_instructions = "論理的根拠を示してください。また、複数の視点から答えてください。"
+    prompt = (
+        f"ユーザーの質問: {query}\n"
+        f"{additional_instructions}\n"
+        "流暢で詳細な回答を生成してください。"
+    )
     logger.debug(f"generate_plain_answer: prompt: {prompt}")
     try:
         result = llm.invoke({"prompt": prompt})
@@ -165,6 +219,8 @@ def generate_plain_answer(query: str) -> str:
     except Exception as e:
         logger.exception("generate_plain_answer: エラー発生")
         return "回答生成中にエラーが発生しました。"
+
+
 
 # ======================
 # 8. 最終回答生成関数（ゲーティングによる分岐＋会話履歴の統合）
